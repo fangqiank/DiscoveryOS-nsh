@@ -193,6 +193,7 @@ function App() {
         showProfile(name());
         pass.set("");
         answer.set("");
+        questionId.set("0");
         dialogOpen.set(false);
       } else {
         notify("sign-in", `Sign-in failed: ${result.reason}`);
@@ -218,6 +219,8 @@ function App() {
     user.set(null);
     name.set("");
     pass.set("");
+    questionId.set("0");
+    answer.set("");
     busy.set(false);
   }
 
