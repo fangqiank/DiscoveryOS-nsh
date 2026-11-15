@@ -10,7 +10,7 @@ import { notify } from "./ui/toast";
 const UPDATED_KEY = "updatedTo";
 
 // The manifest of the latest release (uploaded with each `.nshpkg` by the release step).
-export const UPDATE_MANIFEST_URL = "https://github.com/nicoster/DiscoveryOS-nsh/releases/latest/download/latest.json";
+export const UPDATE_MANIFEST_URL = "https://github.com/fangqiank/DiscoveryOS-nsh/releases/latest/download/latest.json";
 
 const CHECK_DELAY_MS = 3000;
 
