@@ -1,8 +1,8 @@
 name: app release
 
-# Every push to the app-release branch builds the full app for macOS, Windows and Linux, each on its own
-# runner (a package only embeds its icon and runs on the host it is built on), then publishes one GitHub
-# Release with all three assets. Nothing waits for approval.
+# Every push to the app-release branch builds the full Windows app and publishes it as a GitHub
+# Release. (This fork ships Windows only; macOS and Linux stay on the upstream repository.)
+# Nothing waits for approval.
 #
 # The version comes from nsh.json. The build is the Unix time (seconds) of the run: the meta job computes
 # it once, and every job stamps it into its own checkout's nsh.json before packaging. The stamp is not
@@ -16,7 +16,7 @@ name: app release
 # app-release-incremental builds the same way but restores the Rust build cache, so it compiles
 # incrementally. It is a test branch like ci-dryrun: it publishes nothing.
 #
-# ci-dryrun is a test branch: it builds the three packages and uploads them as workflow artifacts, but
+# ci-dryrun is a test branch: it builds the package and uploads it as a workflow artifact, but
 # publishes nothing.
 
 on:
@@ -54,91 +54,6 @@ jobs:
             echo "build=$build"
           } >> "$GITHUB_OUTPUT"
           echo "version $version, build $build"
-
-  macos:
-    runs-on: macos-latest
-    needs: meta
-    env:
-      BUILD: ${{ needs.meta.outputs.build }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Stamp the build into nsh.json
-        run: |
-          python3 -c 'import os, pathlib, re; p = pathlib.Path("nsh.json"); s = p.read_text(encoding="utf-8"); p.write_text(re.sub(r"\"build\":\s*\d+", "\"build\": " + os.environ["BUILD"], s, count=1), encoding="utf-8")'
-          grep -n '"build"' nsh.json
-
-      - name: Restore the nsh CLI cache
-        id: nsh-cache
-        uses: actions/cache@v4
-        with:
-          # nsh finds its runtimes next to bin/nsh, so the whole ~/.nsh directory is cached.
-          path: ~/.nsh
-          key: nsh-${{ env.NSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Restore the Rust build cache
-        # Only the incremental branch reuses compiled artifacts; app-release always builds from scratch.
-        if: github.ref == 'refs/heads/app-release-incremental'
-        uses: actions/cache@v4
-        with:
-          # Incremental compilation: the compiled dependencies and the crate's own artifacts.
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            runner/target
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'runner/Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install the nsh CLI
-        if: steps.nsh-cache.outputs.cache-hit != 'true'
-        run: curl -fsSL https://nsh.dev/install.sh | sh
-
-      - name: Put the nsh CLI on PATH
-        run: |
-          # The installer links ~/.local/bin/nsh; a cache restore does not, so link it every run.
-          test -x "$HOME/.nsh/bin/nsh" || { echo "nsh is not installed at $HOME/.nsh/bin/nsh"; exit 1; }
-          mkdir -p "$HOME/.local/bin"
-          ln -sf "$HOME/.nsh/bin/nsh" "$HOME/.local/bin/nsh"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          nsh --version
-
-      - name: Check for the signing certificate
-        env:
-          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
-        run: |
-          # The secrets context is not allowed in an if: condition, so record the result in the environment.
-          if [ -n "$APPLE_CERT_P12" ]; then echo "HAS_SIGNING_CERT=true" >> "$GITHUB_ENV"; fi
-
-      - name: Import the signing certificate
-        if: env.HAS_SIGNING_CERT == 'true'
-        env:
-          APPLE_CERT_P12: ${{ secrets.APPLE_CERT_P12 }}
-          APPLE_CERT_PASSWORD: ${{ secrets.APPLE_CERT_PASSWORD }}
-        run: |
-          keychain="$RUNNER_TEMP/build.keychain-db"
-          keychain_password=$(openssl rand -hex 24)
-          printf '%s' "$APPLE_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security create-keychain -p "$keychain_password" "$keychain"
-          security set-keychain-settings -lut 21600 "$keychain"
-          security unlock-keychain -p "$keychain_password" "$keychain"
-          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$APPLE_CERT_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
-          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
-          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(.*\)"/\1/p' | head -n 1)
-          test -n "$identity" || { echo "error: no code-signing identity in the certificate" >&2; exit 1; }
-          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-          rm -f "$RUNNER_TEMP/cert.p12"
-
-      - name: Package macOS
-        run: ./scripts/package-macos.sh
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: .nsh/out/release/*.zip
-          if-no-files-found: error
 
   windows:
     runs-on: windows-latest
@@ -206,69 +121,8 @@ jobs:
           path: .nsh/out/release/*.zip
           if-no-files-found: error
 
-  linux:
-    runs-on: ubuntu-latest
-    needs: meta
-    env:
-      BUILD: ${{ needs.meta.outputs.build }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Stamp the build into nsh.json
-        run: |
-          python3 -c 'import os, pathlib, re; p = pathlib.Path("nsh.json"); s = p.read_text(encoding="utf-8"); p.write_text(re.sub(r"\"build\":\s*\d+", "\"build\": " + os.environ["BUILD"], s, count=1), encoding="utf-8")'
-          grep -n '"build"' nsh.json
-
-      # nsh 0.5.1 links GStreamer (videos) as well, so its -dev packages are needed.
-      - name: Install GTK and GStreamer development packages
-        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libjavascriptcoregtk-6.0-dev libwebkitgtk-6.0-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-
-      - name: Restore the nsh CLI cache
-        id: nsh-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.nsh
-          key: nsh-${{ env.NSH_VERSION }}-${{ runner.os }}-${{ runner.arch }}
-
-      - name: Restore the Rust build cache
-        # Only the incremental branch reuses compiled artifacts; app-release always builds from scratch.
-        if: github.ref == 'refs/heads/app-release-incremental'
-        uses: actions/cache@v4
-        with:
-          # Incremental compilation: the compiled dependencies and the crate's own artifacts.
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            runner-linux/target
-          key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            rust-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Install the nsh CLI
-        if: steps.nsh-cache.outputs.cache-hit != 'true'
-        run: curl -fsSL https://nsh.dev/install.sh | sh
-
-      - name: Put the nsh CLI on PATH
-        run: |
-          # The installer links ~/.local/bin/nsh; a cache restore does not, so link it every run.
-          test -x "$HOME/.nsh/bin/nsh" || { echo "nsh is not installed at $HOME/.nsh/bin/nsh"; exit 1; }
-          mkdir -p "$HOME/.local/bin"
-          ln -sf "$HOME/.nsh/bin/nsh" "$HOME/.local/bin/nsh"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          nsh --version
-
-      - name: Package Linux
-        run: ./scripts/package-linux.sh
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux
-          path: .nsh/out/release/*.tar.gz
-          if-no-files-found: error
-
   release:
-    needs: [meta, macos, windows, linux]
+    needs: [meta, windows]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.meta.outputs.version }}
